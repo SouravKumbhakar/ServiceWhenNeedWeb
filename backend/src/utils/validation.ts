@@ -1,5 +1,9 @@
 import mongoose from "mongoose";
 import {
+  BOOKING_STATUSES,
+  BookingStatus,
+} from "../models/booking.model";
+import {
   PROVIDER_TYPES,
   ProviderType,
 } from "../models/providerProfile.model";
@@ -551,3 +555,216 @@ export function validateServiceListQuery(
 }
 
 export { UserRole };
+
+// ---------------------------------------------------------------------------
+// Booking validation — strict ISO 8601 with timezone, future, 365-day bound
+// ---------------------------------------------------------------------------
+
+/**
+ * ISO 8601 datetime with REQUIRED explicit timezone designator.
+ * Accepts: 2030-06-15T10:30:00Z  or  2030-06-15T16:00:00+05:30
+ * Rejects: date-only "2030-06-15", no-timezone "2030-06-15T10:00:00", numbers.
+ */
+const ISO_WITH_TZ_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Maximum milliseconds in the future a booking can be scheduled (365 days).
+ */
+const MAX_SCHEDULED_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Parse and validate a scheduledAt string.
+ * - Must be a string (not a number, not an array/object).
+ * - Must match ISO 8601 format with explicit Z or +hh:mm/-hh:mm timezone.
+ * - Must be a valid calendar date (e.g. Feb 31 rejected).
+ * - Must be strictly in the future (> now).
+ * - Must not be more than 365 days in the future.
+ * Returns the parsed Date on success; throws AppError 400 on failure.
+ */
+export function validateScheduledAt(value: unknown): Date {
+  const MSG =
+    'scheduledAt must be an ISO 8601 string with an explicit timezone (e.g. "2030-06-15T10:30:00Z" or "2030-06-15T16:00:00+05:30")';
+
+  if (value === undefined || value === null) throw badRequest("scheduledAt is required");
+  if (typeof value !== "string") throw badRequest(MSG);
+  if (!ISO_WITH_TZ_REGEX.test(value)) throw badRequest(MSG);
+
+  // Parse to Date
+  const parsed = new Date(value);
+  if (isNaN(parsed.getTime())) throw badRequest(MSG);
+
+  // Validate calendar date by round-tripping the UTC components for Z suffix,
+  // or by verifying JS did not silently roll over the month (e.g. Feb 31).
+  // Strategy: re-format the parsed date back to a normalised ISO and compare
+  // the date part. If the input was "2030-02-31T10:00:00Z", JS rolls it to
+  // "2030-03-03T10:00:00.000Z" — so the date parts won't match.
+  const inputDatePart = value.substring(0, 10); // "YYYY-MM-DD"
+  const parsedDatePart = parsed.toISOString().substring(0, 10);
+
+  // For UTC ("Z"), the date part can be compared directly.
+  // For +offset, the parsed UTC time shifts. We reconstruct the local date
+  // from the offset to check rollover.
+  const tzMatch = value.match(/(Z|([+-])(\d{2}):(\d{2}))$/);
+  if (!tzMatch) throw badRequest(MSG);
+
+  if (tzMatch[1] === "Z") {
+    // UTC: date parts must match exactly
+    if (parsedDatePart !== inputDatePart) {
+      throw badRequest("scheduledAt contains an invalid calendar date");
+    }
+  } else {
+    // Offset: calculate what the local date should be
+    const sign = tzMatch[2] === "+" ? 1 : -1;
+    const offsetMinutes = sign * (parseInt(tzMatch[3], 10) * 60 + parseInt(tzMatch[4], 10));
+    // Adjust parsed UTC back to local time to get the local date
+    const localMs = parsed.getTime() + offsetMinutes * 60 * 1000;
+    const localDate = new Date(localMs);
+    const localDatePart = localDate.toISOString().substring(0, 10);
+    if (localDatePart !== inputDatePart) {
+      throw badRequest("scheduledAt contains an invalid calendar date");
+    }
+  }
+
+  const now = Date.now();
+  if (parsed.getTime() <= now) {
+    throw badRequest("scheduledAt must be in the future");
+  }
+  if (parsed.getTime() - now > MAX_SCHEDULED_MS) {
+    throw badRequest("scheduledAt must not be more than 365 days in the future");
+  }
+
+  return parsed;
+}
+
+/** Fields extracted from a booking create request body. */
+export interface CreateBookingInput {
+  serviceId: string;
+  serviceAddress: string;
+  city: string;
+  scheduledAt: Date;
+  problemDescription?: string;
+}
+
+/**
+ * Validate POST /api/bookings request body.
+ * Whitelists: serviceId, serviceAddress, city, scheduledAt, problemDescription.
+ * Silently ignores: customerId, providerId, serviceTitle, basePrice, status, _id, and anything else.
+ */
+export function validateCreateBookingBody(body: unknown): CreateBookingInput {
+  if (body === null || body === undefined || typeof body !== "object" || Array.isArray(body)) {
+    throw badRequest("Request body must be a JSON object");
+  }
+
+  const raw = body as Record<string, unknown>;
+
+  // serviceId — must be a string and a valid 24-char hex ObjectId
+  const rawServiceId = raw["serviceId"];
+  if (rawServiceId === undefined) throw badRequest("serviceId is required");
+  if (typeof rawServiceId !== "string") throw badRequest("Invalid serviceId");
+  if (!/^[0-9a-fA-F]{24}$/.test(rawServiceId) || !mongoose.isValidObjectId(rawServiceId)) {
+    throw badRequest("Invalid serviceId");
+  }
+
+  // serviceAddress — required, 5–200 chars
+  const rawAddress = raw["serviceAddress"];
+  if (rawAddress === undefined) throw badRequest("serviceAddress is required");
+  if (typeof rawAddress !== "string") throw badRequest("serviceAddress must be a string");
+  const serviceAddress = rawAddress.trim();
+  if (serviceAddress.length < 5 || serviceAddress.length > 200) {
+    throw badRequest("serviceAddress must be between 5 and 200 characters");
+  }
+
+  // city — required, 2–80 chars
+  const rawCity = raw["city"];
+  if (rawCity === undefined) throw badRequest("city is required");
+  if (typeof rawCity !== "string") throw badRequest("city must be a string");
+  const city = rawCity.trim();
+  if (city.length < 2 || city.length > 80) {
+    throw badRequest("city must be between 2 and 80 characters");
+  }
+
+  // scheduledAt — strict ISO 8601 with timezone
+  const scheduledAt = validateScheduledAt(raw["scheduledAt"]);
+
+  // problemDescription — optional, max 1000 chars; empty string treated as absent
+  let problemDescription: string | undefined = undefined;
+  if (raw["problemDescription"] !== undefined && raw["problemDescription"] !== null) {
+    if (typeof raw["problemDescription"] !== "string") {
+      throw badRequest("problemDescription must be a string");
+    }
+    const trimmed = raw["problemDescription"].trim();
+    if (trimmed.length > 1000) {
+      throw badRequest("problemDescription must be at most 1000 characters");
+    }
+    problemDescription = trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  // Return only the whitelisted fields (customerId, providerId, etc. are ignored)
+  return {
+    serviceId: rawServiceId,
+    serviceAddress,
+    city,
+    scheduledAt,
+    problemDescription,
+  };
+}
+
+/** Fields extracted from a booking status update body. */
+export interface UpdateBookingStatusInput {
+  status: BookingStatus;
+}
+
+/**
+ * Validate PATCH /api/bookings/:id/status request body.
+ * Whitelists only `status`. Ignores everything else.
+ */
+export function validateBookingStatusBody(body: unknown): UpdateBookingStatusInput {
+  if (body === null || body === undefined || typeof body !== "object" || Array.isArray(body)) {
+    throw badRequest("Request body must be a JSON object");
+  }
+
+  const raw = body as Record<string, unknown>;
+
+  if (raw["status"] === undefined) throw badRequest("status is required");
+  if (typeof raw["status"] !== "string") throw badRequest("Invalid status");
+  if (!BOOKING_STATUSES.includes(raw["status"] as BookingStatus)) {
+    throw badRequest("Invalid status");
+  }
+
+  // Only return status — any other fields (basePrice, customerId, etc.) are silently ignored
+  return { status: raw["status"] as BookingStatus };
+}
+
+/** Query parameters for listing bookings. */
+export interface BookingListQuery {
+  page: number;
+  limit: number;
+  status?: BookingStatus;
+}
+
+/**
+ * Validate query parameters for GET /api/bookings/my.
+ * page: positive integer, default 1, max 10000.
+ * limit: positive integer, default 10, max 50.
+ * status: optional, must be one of the six statuses.
+ */
+export function validateBookingListQuery(
+  query: Record<string, unknown>
+): BookingListQuery {
+  // Run the injection / array-guard first (reuse parsePaginationParams for page/limit)
+  const { page, limit } = parsePaginationParams(query);
+
+  let status: BookingStatus | undefined = undefined;
+  if (query["status"] !== undefined) {
+    if (typeof query["status"] !== "string") {
+      throw badRequest("Invalid query parameter: status");
+    }
+    if (!BOOKING_STATUSES.includes(query["status"] as BookingStatus)) {
+      throw badRequest("Invalid status");
+    }
+    status = query["status"] as BookingStatus;
+  }
+
+  return { page, limit, status };
+}

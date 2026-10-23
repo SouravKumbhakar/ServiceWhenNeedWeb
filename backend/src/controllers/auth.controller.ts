@@ -74,6 +74,7 @@ export async function me(
       throw new AppError("Invalid or inactive account", 401);
     }
 
+    res.set("Cache-Control", "no-store");
     res.status(200).json({
       success: true,
       data: {

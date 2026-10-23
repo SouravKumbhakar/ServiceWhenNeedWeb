@@ -2,12 +2,16 @@ import crypto from "node:crypto";
 import mongoose from "mongoose";
 import request from "supertest";
 import { Express } from "express";
+import { Booking } from "../../src/models/booking.model";
 import { ProviderProfile } from "../../src/models/providerProfile.model";
 import { Service } from "../../src/models/service.model";
 import { SafeUser, User, UserRole } from "../../src/models/user.model";
 
-// Fast bcrypt rounds and generated secret for tests
-process.env.BCRYPT_SALT_ROUNDS = process.env.BCRYPT_SALT_ROUNDS || "10";
+// Ensure test environment
+process.env.NODE_ENV = "test";
+
+// Fast bcrypt rounds (10) and generated secret for tests
+process.env.BCRYPT_SALT_ROUNDS = "10";
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.startsWith("replace-with")) {
   process.env.JWT_SECRET = crypto.randomBytes(48).toString("hex");
 }
@@ -65,6 +69,7 @@ export async function setupTestDb(): Promise<{ isAvailable: boolean; skipReason:
       User.init(),
       ProviderProfile.init(),
       Service.init(),
+      Booking.init(),
     ]);
     return { isAvailable: true, skipReason: null };
   } catch (error) {
@@ -80,6 +85,7 @@ export async function setupTestDb(): Promise<{ isAvailable: boolean; skipReason:
 export async function clearTestDb(): Promise<void> {
   if (dbConnected && mongoose.connection.readyState === 1) {
     await Promise.all([
+      Booking.deleteMany({}),
       Service.deleteMany({}),
       ProviderProfile.deleteMany({}),
       User.deleteMany({}),

@@ -2,11 +2,25 @@ import express from "express";
 import routes from "./routes/index";
 import { notFound } from "./middleware/notFound.middleware";
 import { errorHandler } from "./middleware/errorHandler.middleware";
+import { corsHandler } from "./middleware/cors.middleware";
+import { securityHeaders } from "./middleware/securityHeaders.middleware";
+import { env } from "./config/env";
 
 const app = express();
 
+// Optional trust proxy configuration (client IP derivation behind reverse proxy)
+if (env.TRUST_PROXY !== undefined) {
+  app.set("trust proxy", env.TRUST_PROXY);
+}
+
 // Remove the default X-Powered-By: Express header
 app.disable("x-powered-by");
+
+// Standard security headers (nosniff, DENY, no-referrer, same-site, HSTS in production)
+app.use(securityHeaders);
+
+// Hand-written CORS handler driven by CORS_ALLOWED_ORIGINS allowlist
+app.use(corsHandler);
 
 // Parse nested query strings (enables object detection for NoSQL operator injection)
 app.set("query parser", "extended");

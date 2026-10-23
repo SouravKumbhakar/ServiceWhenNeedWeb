@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
 import { env } from "./env";
 
+// Configure Mongoose buffer timeout globally so queries during an outage fail fast
+mongoose.set("bufferTimeoutMS", env.BUFFER_TIMEOUT_MS);
+
 // How long (ms) to wait for a server selection before giving up on a connection attempt
 const SERVER_SELECTION_TIMEOUT = 5000;
 

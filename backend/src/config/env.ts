@@ -71,6 +71,71 @@ function parseBcryptRounds(raw: string | undefined, defaultVal: number): number 
   return parsed;
 }
 
+function parsePositiveInt(name: string, raw: string | undefined, defaultVal: number): number {
+  if (raw === undefined || raw === "") return defaultVal;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    throw new Error(
+      `Environment variable ${name} must be a positive integer. Got: "${raw}"`
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Pure helper to parse and validate CORS_ALLOWED_ORIGINS.
+ * Throws on wildcard '*', paths, trailing slashes, or invalid URLs.
+ */
+export function parseAllowedOrigins(raw: string | undefined): string[] {
+  if (!raw || raw.trim() === "") return [];
+  const entries = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (entry === "*") {
+      throw new Error(
+        "Wildcard '*' is not permitted in CORS_ALLOWED_ORIGINS. Specify exact origins (e.g. http://localhost:5173)."
+      );
+    }
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      throw new Error(
+        `Invalid CORS origin: "${entry}". Must be a valid absolute URL (e.g. http://localhost:5173).`
+      );
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error(
+        `Invalid CORS origin protocol: "${entry}". Only http: and https: are permitted.`
+      );
+    }
+    if (url.pathname !== "/" && url.pathname !== "") {
+      throw new Error(`CORS origin must not include a path: "${entry}".`);
+    }
+    if (entry.endsWith("/")) {
+      throw new Error(`CORS origin must not include a trailing slash: "${entry}".`);
+    }
+  }
+  return entries;
+}
+
+function parseTrustProxy(raw: string | undefined): string | number | boolean | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  const num = parseInt(trimmed, 10);
+  if (!isNaN(num) && num >= 0) return num;
+  return raw.trim();
+}
+
+const rawCors = process.env.CORS_ALLOWED_ORIGINS;
+const parsedCorsOrigins = parseAllowedOrigins(rawCors);
+
+// Warn if production has no CORS origins configured
+if ((process.env.NODE_ENV ?? "development") === "production" && parsedCorsOrigins.length === 0) {
+  console.warn("[CORS] Warning: CORS_ALLOWED_ORIGINS is not set in production. Cross-origin requests will be blocked.");
+}
+
 export const env = {
   NODE_ENV: process.env.NODE_ENV ?? "development",
   PORT: parsePort(process.env.PORT, 5000),
@@ -80,4 +145,15 @@ export const env = {
   BCRYPT_SALT_ROUNDS: parseBcryptRounds(process.env.BCRYPT_SALT_ROUNDS, 12),
   // Optional — only required by the test suite, not the app itself
   MONGODB_URI_TEST: process.env.MONGODB_URI_TEST,
+  // Rate limiting (safe defaults: 15m window, 300 general max, 20 auth max)
+  RATE_LIMIT_WINDOW_MS: parsePositiveInt("RATE_LIMIT_WINDOW_MS", process.env.RATE_LIMIT_WINDOW_MS, 900_000),
+  RATE_LIMIT_MAX: parsePositiveInt("RATE_LIMIT_MAX", process.env.RATE_LIMIT_MAX, 300),
+  AUTH_RATE_LIMIT_MAX: parsePositiveInt("AUTH_RATE_LIMIT_MAX", process.env.AUTH_RATE_LIMIT_MAX, 20),
+  // CORS allowlist
+  CORS_ALLOWED_ORIGINS: rawCors,
+  CORS_ORIGINS: parsedCorsOrigins,
+  // Reverse proxy IP derivation
+  TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
+  // Database buffering timeout in ms
+  BUFFER_TIMEOUT_MS: parsePositiveInt("BUFFER_TIMEOUT_MS", process.env.BUFFER_TIMEOUT_MS, 5000),
 } as const;

@@ -57,6 +57,26 @@ export function errorHandler(
 
   const errObj = err as CustomError;
 
+  // --- Database outage / connection failure / buffering timeout (503) ---
+  const isDbOutage =
+    errObj.name === "MongoNetworkError" ||
+    errObj.name === "MongoServerSelectionError" ||
+    errObj.name === "MongooseServerSelectionError" ||
+    errObj.name === "MongoTimeoutError" ||
+    errObj.name === "MongoTopologyClosedError" ||
+    (typeof errObj.message === "string" && /buffering timed out/i.test(errObj.message));
+
+  if (isDbOutage) {
+    res.status(503).json({
+      success: false,
+      error: {
+        message: "Service temporarily unavailable",
+        statusCode: 503,
+      },
+    });
+    return;
+  }
+
   // --- Unhandled MongoDB duplicate-key error ---
   if (errObj.code === 11000) {
     res.status(409).json({

@@ -117,6 +117,8 @@ const providerProfileSchema = new Schema<IProviderProfileDocument>(
   }
 );
 
+providerProfileSchema.index({ isActive: 1, cityKey: 1, createdAt: -1 });
+
 providerProfileSchema.pre("validate", function () {
   if (this.city) {
     this.cityKey = this.city.trim().toLowerCase();
